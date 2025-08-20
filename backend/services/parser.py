@@ -266,30 +266,4 @@ def parse_auction_sheet(pdf_bytes: bytes, filename: str) -> Dict[str, Any]:
         "vehicles": vehicles or [],
     }
     return result
-
-
-def coerce_row_to_vehicle(row: List[str], colmap: Dict[int, str]) -> Dict[str, Any]:
-    v: Dict[str, Any] = {}
-    for i, raw in enumerate(row):
-        key = colmap.get(i)
-        if not key:
-            continue
-        s = (raw or "").strip()
-        if key == "mileage_km":
-            v[key] = parse_mileage_km(s)
-        elif key == "year":
-            # 年式は4桁に制限（例: 1990〜2030くらいを想定して後でビジネスルールで絞る）
-            m = re.search(r"\b(19\d{2}|20\d{2})\b", z2h(s))
-            v[key] = int(m.group(1)) if m else None
-        elif key == "start_price_yen":
-            # 価格は最大9桁（~億円未満）に制限して最初の一致のみ採用
-            ss = z2h(s).replace(",", "")
-            m = re.search(r"(-?\d{1,9})", ss)
-            v[key] = int(m.group(1)) if m else None
-        elif key == "auction_no":
-            # 出品番号も現実的な桁数に制限（1〜6桁想定）
-            m = re.search(r"\b(\d{1,6})\b", z2h(s))
-            v[key] = int(m.group(1)) if m else z2h(s) or None
-        else:
-            v[key] = z2h(s)
-    return v
+    
