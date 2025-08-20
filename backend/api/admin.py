@@ -45,7 +45,7 @@ def list_sheets(
         .outerjoin(Vehicle, Vehicle.sheet_id == AuctionSheet.id)
         .group_by(AuctionSheet.id)
         .order_by(AuctionSheet.id.desc())
-        .limit(limit)
+        # .limit(limit)
         .all()
     )
     html = [
@@ -91,14 +91,14 @@ def list_vehicles(
         )
         .filter(Vehicle.sheet_id == sheet_id)
         .order_by(Vehicle.id.asc())
-        .limit(limit)
+        #.limit(limit)
         .all()
     )
     html = [
         "<html><head><meta charset='utf-8'>",
         f"<style>{_BASE_CSS}</style>",
         "</head><body>",
-        f"<h2>Vehicles for Sheet #{sheet_id} (first {limit})</h2>",
+        f"<h2>Vehicles for Sheet #{sheet_id} (all)</h2>",
         "<p><a href='/admin/sheets'>&laquo; back</a></p>",
         "<table><tr>"
         "<th>ID</th><th>Sheet</th><th>Lot</th><th>Maker</th><th>Car</th>"

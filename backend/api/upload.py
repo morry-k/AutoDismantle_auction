@@ -125,69 +125,83 @@ def _to_date_if_needed(val) -> Optional[date]:
             return None
     return None
 
-
 @router.post("/upload", response_model=AuctionSheetOut)
 async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """
+    方針B：毎回このアップロード結果だけを残す。
+    手順: 新規シート作成 -> 旧シート(=今回以外)を全削除 -> 展開済みvehiclesを挿入
+    すべて1トランザクションで実施（途中失敗は全ロールバック）。
+    """
     # 1) PDF解析（出品票メタ＋車両リストを得る）
     try:
         content = await file.read()
-        parsed = parser.parse_auction_sheet(content, file.filename)
-        # parsed は AuctionSheetIn 相当の dict
+        parsed = parser.parse_auction_sheet(content, file.filename)  # AuctionSheetIn 相当の dict
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to parse PDF: {e}")
 
-    # 2) DB保存（出品票）
-    sheet = AuctionSheet(
-        file_name=parsed["file_name"],
-        auction_name=parsed.get("auction_name"),
-        auction_date=_to_date_if_needed(parsed.get("auction_date")),  # ← 型変換
-    )
-    db.add(sheet)
-    db.flush()  # sheet.id を得る
-
-    # 3) DB保存（車両複数）— 改行展開を先に行う
-    expanded: List[Dict[str, Any]] = []
-    for v in parsed.get("vehicles", []):
-        expanded.extend(_expand_by_index(v, multiline_cols=[
-            "maker", "car_name", "grade", "model_code", "year",
-            "mileage_km", "score", "start_price_yen",
-            "color", "shift", "inspection_until"
-        ]))
-
-    vouts: List[VehicleOut] = []
-    for v in expanded:
-        vo = Vehicle(
-            sheet_id=sheet.id,
-            auction_no=_safe_int(v.get("auction_no"), max_abs=9_999_999),  # 1〜7桁程度
-            maker=v.get("maker"),
-            car_name=v.get("car_name"),
-            grade=v.get("grade"),
-            model_code=v.get("model_code"),
-            year=_safe_int(v.get("year"), max_abs=3000),                   # 〜西暦上限
-            mileage_km=_safe_int(v.get("mileage_km"), max_abs=10_000_000), # 1千万km上限
-            color=v.get("color"),
-            shift=v.get("shift"),
-            inspection_until=v.get("inspection_until"),
-            score=v.get("score"),
-            start_price_yen=_safe_int(v.get("start_price_yen"), max_abs=1_000_000_000),  # 〜10億
-            raw_extracted_json=v.get("raw_extracted_json"),
-        )
-
-        db.add(vo)
-        db.flush()
-        vouts.append(VehicleOut(
-            id=vo.id, auction_no=vo.auction_no, maker=vo.maker, car_name=vo.car_name,
-            grade=vo.grade, model_code=vo.model_code, year=vo.year, mileage_km=vo.mileage_km,
-            color=vo.color, shift=vo.shift, inspection_until=vo.inspection_until,
-            score=(str(vo.score) if vo.score is not None else None),
-            start_price_yen=vo.start_price_yen,
-            raw_extracted_json=vo.raw_extracted_json
-        ))
-
-    db.commit()
-
-    # ---- レスポンス検証（開発用） ----
     try:
+        # === トランザクション開始 ===
+        with db.begin():
+            # 2) DB保存（出品票を先に1件作成し、IDを確保）
+            sheet = AuctionSheet(
+                file_name=parsed["file_name"],
+                auction_name=parsed.get("auction_name"),
+                auction_date=_to_date_if_needed(parsed.get("auction_date")),
+            )
+            db.add(sheet)
+            db.flush()  # sheet.id を得る（以降の delete で自身を除外するために必要）
+
+            # 3) 旧データを全削除（今回の sheet 以外）
+            #    ※ 外部キーに ON DELETE CASCADE がない場合に備えて二段構えでもOK
+            #    まず vehicles 側（今回の sheet_id は除外）→ 次に auction_sheets 側を削除
+            db.query(Vehicle).filter(Vehicle.sheet_id != sheet.id).delete(synchronize_session=False)
+            db.query(AuctionSheet).filter(AuctionSheet.id != sheet.id).delete(synchronize_session=False)
+
+            # 4) 車両を改行展開して挿入
+            expanded: List[Dict[str, Any]] = []
+            for v in parsed.get("vehicles", []):
+                expanded.extend(_expand_by_index(
+                    v,
+                    multiline_cols=[
+                        # 改行混入し得る列（展開＋ブロードキャスト対象）
+                        "maker", "car_name", "grade", "model_code", "year",
+                        "mileage_km", "score", "start_price_yen",
+                        "color", "shift", "inspection_until"
+                    ]
+                ))
+
+            vouts: List[VehicleOut] = []
+            for v in expanded:
+                vo = Vehicle(
+                    sheet_id=sheet.id,
+                    auction_no=_safe_int(v.get("auction_no"), max_abs=9_999_999),
+                    maker=v.get("maker"),
+                    car_name=v.get("car_name"),
+                    grade=v.get("grade"),
+                    model_code=v.get("model_code"),
+                    year=_safe_int(v.get("year"), max_abs=3000),
+                    mileage_km=_safe_int(v.get("mileage_km"), max_abs=10_000_000),
+                    color=v.get("color"),
+                    shift=v.get("shift"),
+                    inspection_until=v.get("inspection_until"),
+                    score=v.get("score"),
+                    start_price_yen=_safe_int(v.get("start_price_yen"), max_abs=1_000_000_000),
+                    raw_extracted_json=v.get("raw_extracted_json"),
+                )
+                db.add(vo)
+                db.flush()
+                vouts.append(VehicleOut(
+                    id=vo.id, auction_no=vo.auction_no, maker=vo.maker, car_name=vo.car_name,
+                    grade=vo.grade, model_code=vo.model_code, year=vo.year, mileage_km=vo.mileage_km,
+                    color=vo.color, shift=vo.shift, inspection_until=vo.inspection_until,
+                    score=(str(vo.score) if vo.score is not None else None),
+                    start_price_yen=vo.start_price_yen,
+                    raw_extracted_json=vo.raw_extracted_json
+                ))
+
+        # === ここで commit 済み ===
+
+        # ---- レスポンス生成（Pydantic検証つき） ----
         payload = AuctionSheetOut(
             id=sheet.id,
             file_name=sheet.file_name,
@@ -197,7 +211,9 @@ async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)
             vehicles=vouts,
         )
         return payload
+
     except ValidationError as ve:
+        # レスポンスモデル検証の失敗
         return JSONResponse(
             status_code=500,
             content={
@@ -214,3 +230,6 @@ async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)
                 })
             }
         )
+    except Exception as e:
+        # パース・挿入・削除など途中での失敗はすべてロールバックされる
+        raise HTTPException(status_code=400, detail=f"Upload failed: {e}")
