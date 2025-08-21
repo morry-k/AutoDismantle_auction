@@ -94,6 +94,10 @@ HEADER_ALIASES = {
     "inspection_until": ["車検", "車検有効", "車検満了", "検切れ"],
     "score":      ["評価", "評価点", "点数"],
     "start_price_yen": ["スタート", "開始価格", "最低価格", "Start"],
+    "displacement_cc": ["排気量", "cc", "エンジン"],
+    "aircon": ["ｴｱｺﾝ", "エアコン", "A/C"],
+    "equipment": ["装備", "オプション"],
+    "lane": ["レーン", "ﾚｰﾝ", "Lane"],
 }
 
 
@@ -135,6 +139,8 @@ def coerce_row_to_vehicle(row: List[str], colmap: Dict[int, str]) -> Dict[str, A
             ss = z2h(s).replace(",", "")
             m = re.search(r"(-?\d+)", ss)
             v[key] = int(m.group(1)) if m else None
+        elif key == "displacement_cc":
+            v[key] = to_int_or_none(s)
         else:
             v[key] = z2h(s)
     return v

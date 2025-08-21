@@ -88,6 +88,7 @@ def list_vehicles(
             Vehicle.mileage_km,
             Vehicle.start_price_yen,
             Vehicle.score,
+            Vehicle.lane,            # ← 追加
         )
         .filter(Vehicle.sheet_id == sheet_id)
         .order_by(Vehicle.id.asc())
@@ -102,7 +103,7 @@ def list_vehicles(
         "<p><a href='/admin/sheets'>&laquo; back</a></p>",
         "<table><tr>"
         "<th>ID</th><th>Sheet</th><th>Lot</th><th>Maker</th><th>Car</th>"
-        "<th>Grade</th><th>Model</th><th>Year</th><th>KM</th><th>Start ¥</th><th>Score</th>"
+        "<th>Grade</th><th>Model</th><th>Year</th><th>KM</th><th>Start</th><th>Score</th><th>Lane</th>"
         "</tr>"
     ]
     for r in rows:
@@ -119,6 +120,7 @@ def list_vehicles(
             f"<td>{_esc(r.mileage_km)}</td>"
             f"<td>{_esc(r.start_price_yen)}</td>"
             f"<td>{_esc(r.score)}</td>"
+            f"<td>{_esc(r.lane)}</td>"
             "</tr>"
         )
     html.append("</table></body></html>")

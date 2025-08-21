@@ -32,6 +32,7 @@ class Vehicle(Base):
     score = Column(String, nullable=True)
     start_price_yen = Column(Integer, nullable=True)
     raw_extracted_json = Column(JSON, nullable=True)
+    lane = Column(String, nullable=True)             # ← 追加
 
     sheet = relationship("AuctionSheet", back_populates="vehicles")
     valuations = relationship("Valuation", back_populates="vehicle", cascade="all, delete-orphan")

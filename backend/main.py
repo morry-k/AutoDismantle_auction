@@ -36,6 +36,15 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 from api.upload import router as upload_router
 from api.admin import router as admin_router
 
+from db import engine, Base, ensure_schema   # ← 追加
+from models_db import AuctionSheet, Vehicle, Valuation  # ← テーブル定義をImportしてregistryへ
+
+# 起動時にテーブル作成＆軽量マイグレーションを実施
+@app.on_event("startup")
+def _startup():
+    Base.metadata.create_all(bind=engine)  # ないテーブルを作る（既存はスキップ）
+    ensure_schema(engine)                  # 既存テーブルに lane 列が無ければ追加
+
 app.include_router(upload_router, prefix="/api")
 app.include_router(admin_router)  # admin.py で prefix="/admin" になっているのでこのままでOK
 

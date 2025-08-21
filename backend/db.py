@@ -1,5 +1,5 @@
 # backend/db.py
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 import os
 
@@ -21,3 +21,15 @@ def get_db():
         yield db
     finally:
         db.close()
+
+# --- 起動時の軽量オートマイグレーション（SQLite用） ---
+def ensure_column(engine, table: str, column: str, type_sql: str) -> None:
+    """存在しないカラムだけを追加する（SQLite）"""
+    with engine.begin() as conn:
+        cols = [row[1] for row in conn.execute(text(f"PRAGMA table_info({table})"))]
+        if column not in cols:
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {type_sql}"))
+
+def ensure_schema(engine) -> None:
+    # 必要に応じて増やせます
+    ensure_column(engine, "vehicles", "lane", "TEXT")

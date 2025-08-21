@@ -17,6 +17,10 @@ class VehicleIn(BaseModel):
     score: Optional[str] = None
     start_price_yen: Optional[int] = None
     raw_extracted_json: Optional[Dict[str, Any]] = None
+    displacement_cc: Optional[int] = None
+    aircon: Optional[str] = None
+    equipment: Optional[str] = None
+    lane: Optional[str] = None
 
 class AuctionSheetIn(BaseModel):
     file_name: str
