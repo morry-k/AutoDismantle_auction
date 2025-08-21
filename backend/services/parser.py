@@ -1,6 +1,6 @@
 # backend/services/parser.py
 # PDF出品票を解析して AuctionSheetIn 互換の dict を返す実装（pdfplumber版）
-# Python 3.9 対応 / 2025-08-21 Maker抽出ロジック改良（分割カラム対応・最小修正）
+# Python 3.9 対応 / 2025-08-21 メーカー抽出の安定化（空行スキップ・断片規則強化・濁点無視・先頭補完スライド）
 
 import io
 import re
@@ -10,7 +10,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pdfplumber
 
+
 # ==== ユーティリティ ====
+
 ZEN2HAN = str.maketrans("０１２３４５６７８９－，．／", "0123456789-,./")
 
 def z2h(s: Optional[str]) -> str:
@@ -37,6 +39,7 @@ def parse_mileage_km(s: Optional[str]) -> Optional[int]:
 
 def parse_auction_date(text: str) -> Optional[date]:
     t = z2h(text)
+    # 例: 2025/07/31
     m = re.search(r"(20\d{2})[/-](\d{1,2})[/-](\d{1,2})", t)
     if m:
         y, mo, d = map(int, m.groups())
@@ -44,6 +47,7 @@ def parse_auction_date(text: str) -> Optional[date]:
             return date(y, mo, d)
         except Exception:
             pass
+    # 例: 令和7年7
     m = re.search(r"([Rr令][\s]*)(\d{1,2})[./年](\d{1,2})", t)
     if m:
         era_year = int(m.group(2)); month = int(m.group(3)); day = 1
@@ -52,6 +56,7 @@ def parse_auction_date(text: str) -> Optional[date]:
             return date(base + era_year, month, day)
         except Exception:
             pass
+    # 例: 平成31年4
     m = re.search(r"[Hh平成][\s]*(\d{1,2})[./年](\d{1,2})", t)
     if m:
         era_year = int(m.group(1)); month = int(m.group(2)); day = 1
@@ -62,12 +67,29 @@ def parse_auction_date(text: str) -> Optional[date]:
             pass
     return None
 
-def _complete_maker_prefix(token_norm: str) -> Optional[str]:
-    cands = [mk_orig for mk_norm, mk_orig in _KNOWN_MAKERS_NORM.items()
-             if mk_norm.startswith(token_norm)]
-    return cands[0] if len(cands) == 1 else None
+# 濁点・半濁点を無視した比較用（例: トヨダ→トヨタ扱い）
+_DAKUTEN_BASE = str.maketrans(
+    "ガギグゲゴザジズゼゾダヂヅデドバビブベボヴパピプペポ",
+    "カキクケコサシスセソタチツテトハヒフヘホウハヒフヘホ"
+)
+def _devoice_katakana(s: str) -> str:
+    return (s or "").translate(_DAKUTEN_BASE)
+
+def _norm_jp(s: str) -> str:
+    # 半角→全角統一、空白除去、記号ゆれの吸収
+    t = unicodedata.normalize("NFKC", s or "")
+    t = re.sub(r"\s+", "", t)
+    t = t.replace("ｰ", "ー").replace("･", "・").replace("‐", "ー").replace("―", "ー")
+    return t
+
+def _strip_leading_lot_tokens(text: str) -> str:
+    # 行頭の出品番号などを剥がす（例: "87333トヨ"→"トヨ…"）
+    t = re.sub(r"^\s*(?:出品\s*No\.?\s*|No\.?\s*|#|＃|№)?\s*\d{3,7}", "", text)
+    return t.strip()
+
 
 # ==== ヘッダ定義 ====
+
 HEADER_ALIASES: Dict[str, List[str]] = {
     "auction_no": ["出品番号", "番号", "Lot", "LOT", "ロット", "車番", "出品No", "出品No."],
     "maker": ["メーカー", "メーカー名", "Maker", "Make", "ﾒｰｶｰ"],
@@ -95,103 +117,114 @@ KNOWN_MAKERS: List[str] = [
     "ランドローバー", "ジャガー", "キャデラック", "シボレー", "フォード", "テスラ",
 ]
 
-# 先頭付近の定義に追加
-MAKER_FRAGMENT_RULES = [
+# 列割れメーカー断片の復元ルール（例: 「トヨ」「タ」→トヨタ）
+MAKER_FRAGMENT_RULES: List[Tuple[Tuple[str, str], str]] = [
     (("トヨ", "タ"), "トヨタ"),
     (("ホン", "ダ"), "ホンダ"),
     (("スバ", "ル"), "スバル"),
     (("ダイ", "ハツ"), "ダイハツ"),
     (("マツ", "ダ"), "マツダ"),
+    (("スズ", "キ"), "スズキ"),
 ]
 
-def _lead_kana(s: str, n: int = 2) -> str:
-    return _norm_jp(z2h(s))[:n]
-
-
+# 正規化済みの既知メーカー辞書
 _KNOWN_MAKERS_NORM: Dict[str, str] = {unicodedata.normalize("NFKC", mk): mk for mk in KNOWN_MAKERS}
 
-# ==== 正規化とサルベージ ====
-def _norm_jp(s: str) -> str:
-    # 半角ｶﾅ→全角、空白除去、長音/中黒のゆれを最小限吸収
-    t = unicodedata.normalize("NFKC", s or "")
-    t = re.sub(r"\s+", "", t)
-    t = t.replace("ｰ", "ー").replace("･", "・").replace("‐", "ー").replace("―", "ー")
-    return t
 
-def _strip_leading_lot_tokens(text: str) -> str:
-    # スペース無しの数字直結にも対応
-    t = re.sub(r"^\s*(?:出品\s*No\.?\s*|No\.?\s*|#|＃|№)?\s*\d{3,7}", "", text)
-    return t.strip()
+# ==== メーカー抽出（サルベージ） ====
+
+def _complete_maker_prefix(token_norm: str) -> Optional[str]:
+    # 先頭2〜3文字の完全一致で一意に決まる場合に採用
+    cands = [mk_orig for mk_norm, mk_orig in _KNOWN_MAKERS_NORM.items() if mk_norm.startswith(token_norm)]
+    return cands[0] if len(cands) == 1 else None
 
 def salvage_maker_from_row_cells(row: List[str]) -> Tuple[Optional[str], Optional[str]]:
     """
-    行内（列跨ぎを含む）からメーカーと車名候補を抽出。
-    戻り: (maker or None, car_name_rest or None)
+    行内（列またぎ含む）からメーカー名と車名の残りを抽出。
+    戻り値: (maker or None, car_name_rest or None)
     """
     if not row:
         return None, None
+    # 空行は即スキップ
+    if not any((c or "").strip() for c in row):
+        return None, None
 
+    # 0) 先頭6列の隣接ペアで断片復元（高速）
     first6 = [(c or "") for c in row[:6]]
+    def _lead2_norm(s: str) -> str:
+        return _norm_jp(z2h(s))[:2]
     for i in range(len(first6) - 1):
-        a = _lead_kana(first6[i], 2)
-        b = _lead_kana(first6[i + 1], 2)
+        a = _lead2_norm(first6[i])
+        b = _lead2_norm(first6[i + 1])
+        a_dev, b_dev = _devoice_katakana(a), _devoice_katakana(b)
         for (fragA, fragB), mk in MAKER_FRAGMENT_RULES:
-            if a.endswith(fragA) and (b.startswith(fragB) or fragB in b):
+            # 通常比較 or 濁点除去比較のどちらかで一致すれば採用
+            if (a.endswith(fragA) and (b.startswith(fragB) or fragB in b)) or \
+               (a_dev.endswith(fragA) and (b_dev.startswith(fragB) or fragB in b_dev)):
                 return mk, None
 
-
-    # 1) 先頭5列を連結（例: "86009ホン"+"ダ" → "86009ホンダ"）
+    # 1) 先頭6列を結合 → 出品番号剥がし → 既知メーカー包含（濁点無視も併用）
     left_join = "".join([(c or "") for c in row[:6]])
     head = _strip_leading_lot_tokens(z2h(left_join))
     head_norm = _norm_jp(head)
-
-    # 既知メーカーの包含チェック
+    head_dev = _devoice_katakana(head_norm)
     for mk_norm, mk_orig in _KNOWN_MAKERS_NORM.items():
-        if mk_norm in head_norm:
+        if mk_norm in head_norm or mk_norm in head_dev:
             rest = head_norm.replace(mk_norm, "").strip() or None
             return mk_orig, rest
 
-    # 2) 列割れの2分割復元（a列の末尾×b列の先頭）
+    # 2) 列割れの2分割復元（a列末尾×b列先頭）
     lead5 = [(c or "") for c in row[:5]]
-    def _lead2(s: str) -> str:
-        return _norm_jp(z2h(s))[:2]
     for i in range(len(lead5) - 1):
-        a = _lead2(lead5[i]); b = _lead2(lead5[i + 1])
+        a = _lead2_norm(lead5[i]); b = _lead2_norm(lead5[i + 1])
+        a_dev, b_dev = _devoice_katakana(a), _devoice_katakana(b)
         for (fragA, fragB), mk in MAKER_FRAGMENT_RULES:
-            if a.endswith(fragA) and (b.startswith(fragB) or fragB in b):
+            if (a.endswith(fragA) and (b.startswith(fragB) or fragB in b)) or \
+               (a_dev.endswith(fragA) and (b_dev.startswith(fragB) or fragB in b_dev)):
                 return mk, None
 
-    # 3) 行全体でも一応チェック
+    # 3) 行全体の結合でもう一度チェック
     all_join = " ".join([c for c in row if c]).strip()
     all_norm = _norm_jp(_strip_leading_lot_tokens(z2h(all_join)))
+    all_dev = _devoice_katakana(all_norm)
     for mk_norm, mk_orig in _KNOWN_MAKERS_NORM.items():
-        if mk_norm in all_norm:
+        if mk_norm in all_norm or mk_norm in all_dev:
             rest = all_norm.replace(mk_norm, "").strip() or None
             return mk_orig, rest
 
-    # 先頭トークン（カタカナ/漢字 2〜3 文字）を取り出して補完
-    m = re.match(r"^([\u30A0-\u30FF\u4E00-\u9FFF]{2,3})", head_norm)
-    if m:
-        mk = _complete_maker_prefix(m.group(1))
-        if mk:
-            return mk, None
+    # 4) 先頭トークン（2〜3文字）のスライド補完（濁点無視も試す）
+    tokens = re.findall(r"[\u30A0-\u30FF\u4E00-\u9FFF]", head_norm)
+    for n in (3, 2):
+        limit = max(0, len(tokens) - n + 1)
+        for i in range(0, min(limit, 6)):  # 先頭〜6文字範囲を走査
+            t = "".join(tokens[i:i + n])
+            t_dev = _devoice_katakana(t)
+            mk = _complete_maker_prefix(t) or _complete_maker_prefix(t_dev)
+            if mk:
+                return mk, None
 
     return None, None
 
 def salvage_maker_from_car_name_prefix(v: Dict[str, Any]) -> None:
+    """
+    car_name の先頭にメーカー名が含まれている場合に分離して maker を設定。
+    """
     name = (v.get("car_name") or "").strip()
     if not name or v.get("maker"):
         return
     name_norm = _norm_jp(z2h(name))
+    name_dev = _devoice_katakana(name_norm)
     for mk_norm, mk_orig in _KNOWN_MAKERS_NORM.items():
-        if name_norm.startswith(mk_norm):
+        if name_norm.startswith(mk_norm) or name_dev.startswith(mk_norm):
             rest = name_norm[len(mk_norm):].strip()
             v["maker"] = mk_orig
             if rest:
                 v["car_name"] = rest
             return
 
+
 # ==== ヘッダ解析 ====
+
 def header_match_score(cell: str, target_list: List[str]) -> int:
     cs = z2h(cell)
     return max((1 if alias in cs else 0) for alias in target_list)
@@ -207,6 +240,9 @@ def normalize_header_row(row: List[str]) -> Dict[int, str]:
         if best_key:
             mapping[idx] = best_key
     return mapping
+
+
+# ==== 行→車両 dict 変換 ====
 
 def coerce_row_to_vehicle(row: List[str], colmap: Dict[int, str]) -> Dict[str, Any]:
     v: Dict[str, Any] = {}
@@ -229,8 +265,13 @@ def coerce_row_to_vehicle(row: List[str], colmap: Dict[int, str]) -> Dict[str, A
             v[key] = z2h(s)
     return v
 
+
 # ==== 行展開処理（縦積み） ====
+
 def explode_stacked_row(row: List[str]) -> List[List[str]]:
+    """
+    セル内改行を縦展開。列長に合わせて空文字で埋める。
+    """
     split_cols: List[List[str]] = [(c or "").splitlines() for c in row]
     max_len = max((len(p) for p in split_cols), default=1)
     if max_len <= 1:
@@ -240,15 +281,17 @@ def explode_stacked_row(row: List[str]) -> List[List[str]]:
         out.append([(p[i].strip() if i < len(p) else "") for p in split_cols])
     return out
 
+
 # ==== メイン処理 ====
+
 def parse_auction_sheet(pdf_bytes: bytes, filename: str) -> Dict[str, Any]:
     auction_name: Optional[str] = None
     auction_date_val: Optional[date] = None
     vehicles: List[Dict[str, Any]] = []
 
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-        # 全文から会場名・日付
-        all_text = []
+        # 全ページのテキストをまとめて会場名と日付を抽出
+        all_text: List[str] = []
         for page in pdf.pages:
             try:
                 all_text.append(page.extract_text() or "")
@@ -261,11 +304,15 @@ def parse_auction_sheet(pdf_bytes: bytes, filename: str) -> Dict[str, Any]:
             auction_name = z2h(m.group(1)).replace(" ", "")
         auction_date_val = parse_auction_date(joined)
 
-        # テーブル抽出
+        # 各ページでテーブル抽出
         for page in pdf.pages:
             table_settings_candidates = [
-                dict(vertical_strategy="lines", horizontal_strategy="lines", snap_tolerance=3, join_tolerance=3, edge_min_length=20, min_words_vertical=1),
-                dict(vertical_strategy="text", horizontal_strategy="text", snap_tolerance=8, join_tolerance=8, edge_min_length=10, min_words_vertical=1),
+                # 罫線ベース
+                dict(vertical_strategy="lines", horizontal_strategy="lines",
+                     snap_tolerance=3, join_tolerance=3, edge_min_length=20, min_words_vertical=1),
+                # テキスト位置ベース
+                dict(vertical_strategy="text", horizontal_strategy="text",
+                     snap_tolerance=8, join_tolerance=8, edge_min_length=10, min_words_vertical=1),
             ]
             tables: List[List[List[str]]] = []
             for ts in table_settings_candidates:
@@ -274,14 +321,17 @@ def parse_auction_sheet(pdf_bytes: bytes, filename: str) -> Dict[str, Any]:
                     if _t:
                         tables.extend(_t)
                 except Exception:
+                    # このページ・設定は無視して次へ
                     pass
 
             for tbl in tables:
                 if not tbl or len(tbl) < 2:
                     continue
-                # ヘッダ推定
+
+                # 1〜3行目のいずれかをヘッダとして最適化
                 header_row_idx, header_map, best_cols = 0, {}, 0
-                for i in range(min(3, len(tbl))):
+                max_check = min(3, len(tbl))
+                for i in range(max_check):
                     row = [(c or "").strip() for c in tbl[i]]
                     mapping = normalize_header_row(row)
                     if len(mapping) > best_cols:
@@ -289,15 +339,19 @@ def parse_auction_sheet(pdf_bytes: bytes, filename: str) -> Dict[str, Any]:
                 if not header_map:
                     continue
 
-                # データ行
-                data_rows = tbl[header_row_idx + 1 :]
+                # データ行を処理
+                data_rows = tbl[header_row_idx + 1:]
                 for r in data_rows:
                     base_row = [(c or "").strip() for c in r]
-                    # 縦積み展開
+                    # セル内改行を縦展開
                     for row in explode_stacked_row(base_row):
+                        # 空行（全セル空/空白のみ）は捨てる
+                        if not any((c or "").strip() for c in row):
+                            continue
+
                         vehicle = coerce_row_to_vehicle(row, header_map)
 
-                        # maker サルベージ（列割れ & 行内）
+                        # メーカーのサルベージ（列割れ・混入・濁点ずれを吸収）
                         if not vehicle.get("maker"):
                             mk, car_rest = salvage_maker_from_row_cells(row)
                             if mk:
@@ -305,18 +359,22 @@ def parse_auction_sheet(pdf_bytes: bytes, filename: str) -> Dict[str, Any]:
                                 if not vehicle.get("car_name") and car_rest:
                                     vehicle["car_name"] = car_rest
 
-                        # car_name 先頭にメーカーが付いていれば分離
+                        # 車名先頭にメーカーが含まれる場合は分離
                         salvage_maker_from_car_name_prefix(vehicle)
 
-                        # 最低限のキーが無ければ捨てる
+                        # 最低限のキー（auction_no / car_name / maker）が何も無ければ捨てる
                         if not any(vehicle.get(k) for k in ("auction_no", "car_name", "maker")):
                             continue
 
+                        # 元行の生データを添付（デバッグ観察用）
                         if "raw_extracted_json" not in vehicle:
                             vehicle["raw_extracted_json"] = {"row": row}
+                        elif "row" not in vehicle["raw_extracted_json"]:
+                            vehicle["raw_extracted_json"]["row"] = row
 
                         vehicles.append(vehicle)
 
+    # ファイル名からの最終フォールバック（念のため）
     if not auction_name and "uss" in (filename or "").lower():
         auction_name = "USS"
 
