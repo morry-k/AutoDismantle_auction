@@ -102,8 +102,8 @@ def list_vehicles(
         f"<h2>Vehicles for Sheet #{sheet_id} (all)</h2>",
         "<p><a href='/admin/sheets'>&laquo; back</a></p>",
         "<table><tr>"
-        "<th>ID</th><th>Sheet</th><th>Lot</th><th>Maker</th><th>Car</th>"
-        "<th>Grade</th><th>Model</th><th>Year</th><th>KM</th><th>Start</th><th>Score</th><th>Lane</th>"
+        "<th>ID</th><th>Sheet</th><th>Shuppin_No</th><th>Maker</th><th>Car</th>"
+        "<th>Grade</th><th>Nenshiki</th><th>Katashiki</th><th>Haikiryou</th><th>kyori</th><th>Iro</th><th>Shift</th><th>AC</th><th>Soubi</th><th>Score</th><th>Start</th><th>Lane</th>"
         "</tr>"
     ]
     for r in rows:
@@ -115,11 +115,16 @@ def list_vehicles(
             f"<td>{_esc(r.maker)}</td>"
             f"<td>{_esc(r.car_name)}</td>"
             f"<td>{_esc(r.grade)}</td>"
-            f"<td>{_esc(r.model_code)}</td>"
             f"<td>{_esc(r.year)}</td>"
+            f"<td>{_esc(r.model_code)}</td>"
+            f"<td>{_esc(r.model_code)}</td>"
             f"<td>{_esc(r.mileage_km)}</td>"
-            f"<td>{_esc(r.start_price_yen)}</td>"
+            f"<td>{_esc(r.model_code)}</td>"
+            f"<td>{_esc(r.model_code)}</td>"
+            f"<td>{_esc(r.model_code)}</td>"
+            f"<td>{_esc(r.model_code)}</td>"
             f"<td>{_esc(r.score)}</td>"
+            f"<td>{_esc(r.start_price_yen)}</td>"
             f"<td>{_esc(r.lane)}</td>"
             "</tr>"
         )
